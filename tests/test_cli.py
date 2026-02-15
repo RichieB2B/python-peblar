@@ -4,12 +4,19 @@ from __future__ import annotations
 
 import io
 from contextlib import redirect_stdout
+from typing import TYPE_CHECKING
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from aresponses import ResponsesMockServer
+from typer.testing import CliRunner
 
-from peblar.cli import identify, versions
+from peblar.cli import cli, identify, versions
+from peblar.models import PeblarVersions
 from tests import load_fixture
+
+if TYPE_CHECKING:
+    from collections.abc import Iterator
 
 
 def _add_versions_responses(aresponses: ResponsesMockServer) -> None:
@@ -38,6 +45,22 @@ def _add_versions_responses(aresponses: ResponsesMockServer) -> None:
             body=load_fixture("peblar_versions.json"),
         ),
     )
+
+
+@pytest.fixture
+def patched_peblar_versions_for_cli() -> Iterator[None]:
+    """Patch Peblar so CliRunner runs versions without HTTP (nested asyncio.run)."""
+    vers = PeblarVersions.from_json(load_fixture("peblar_versions.json").encode())
+    mock_instance = AsyncMock()
+    mock_instance.login = AsyncMock()
+    mock_instance.current_versions = AsyncMock(return_value=vers)
+    mock_instance.available_versions = AsyncMock(return_value=vers)
+    mock_cm = MagicMock()
+    mock_cm.__aenter__ = AsyncMock(return_value=mock_instance)
+    mock_cm.__aexit__ = AsyncMock(return_value=False)
+    mock_cls = MagicMock(return_value=mock_cm)
+    with patch("peblar.cli.Peblar", mock_cls):
+        yield
 
 
 def _add_identify_responses(aresponses: ResponsesMockServer) -> None:
@@ -102,6 +125,30 @@ async def test_versions_short_quiet_flag_still_prints_table(
         await versions(host="example.com", password="secret", quiet=True)
 
     assert "Firmware" in capture.getvalue()
+
+
+@pytest.mark.usefixtures("patched_peblar_versions_for_cli")
+@pytest.mark.parametrize("quiet_flag", ["-q", "--quiet"], ids=["short_q", "long_quiet"])
+def test_versions_cli_runner_quiet_flags_print_table(quiet_flag: str) -> None:
+    """CliRunner: -q and --quiet keep the versions table."""
+    runner = CliRunner()
+    result = runner.invoke(
+        cli,
+        [
+            "versions",
+            "--host",
+            "example.com",
+            "--password",
+            "secret",
+            quiet_flag,
+        ],
+        catch_exceptions=False,
+    )
+    assert result.exit_code == 0
+    out = result.stdout
+    assert "Peblar charger versions" in out
+    assert "Firmware" in out
+    assert "1.6.1+1" in out
 
 
 @pytest.mark.asyncio

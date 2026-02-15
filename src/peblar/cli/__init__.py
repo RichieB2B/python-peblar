@@ -42,6 +42,7 @@ cli = AsyncTyper(help="Peblar CLI", no_args_is_help=True, add_completion=False)
 console = Console()
 
 QUIET_OPTION = typer.Option(
+    ...,
     "--quiet",
     "-q",
     help="Be quiet on success; read-only commands still print tables and results",
@@ -977,7 +978,7 @@ async def user_configuration(  # pylint: disable=too-many-statements
             show_default=False,
         ),
     ] = None,
-    quiet: Annotated[bool, QUIET_OPTION] = False,
+    quiet: Annotated[bool, QUIET_OPTION] = False,  # noqa: ARG001  # pylint: disable=unused-argument
 ) -> None:
     """Show or change the user configuration."""
     if charge_current_limit is not None and charge_current_limit < 6:
