@@ -2,9 +2,13 @@
 
 import asyncio
 import contextlib
+import csv
 import io
 import sys
+from datetime import UTC, datetime
+from pathlib import Path
 from typing import Annotated
+from zoneinfo import ZoneInfo
 
 import typer
 from rich.console import Console
@@ -20,7 +24,12 @@ from peblar.exceptions import (
     PeblarConnectionError,
     PeblarUnsupportedFirmwareVersionError,
 )
-from peblar.models import PeblarSetUserConfiguration
+from peblar.models import (
+    PeblarMeterHistory,
+    PeblarMeterHistorySession,
+    PeblarRfidToken,
+    PeblarSetUserConfiguration,
+)
 from peblar.peblar import Peblar
 
 from .async_typer import AsyncTyper
@@ -44,6 +53,223 @@ def convert_to_string(value: object) -> str:
     if isinstance(value, dict):
         return "".join(f"{key}: {value}" for key, value in value.items())
     return str(value)
+
+
+def format_meterhistory_time(timestamp: int | None, timezone: ZoneInfo) -> str:
+    """Format a unix timestamp for meter history CSV output."""
+    if timestamp is None:
+        return "Unknown"
+    return (
+        datetime.fromtimestamp(timestamp, UTC)
+        .astimezone(timezone)
+        .strftime("%d/%m/%Y %H:%M:%S")
+    )
+
+
+def format_meterhistory_energy(energy_mwh: int | None) -> str:
+    """Format mWh to kWh with three decimals."""
+    if energy_mwh is None:
+        return "Unknown"
+    return f"{energy_mwh / 1_000_000:,.3f}"
+
+
+def normalize_meterhistory_bound(
+    value: str | None,
+    *,
+    is_stop: bool = False,
+) -> str | None:
+    """Convert a date-only meter history bound to UTC ISO format."""
+    if value is None or "T" in value:
+        return value
+
+    try:
+        bound = datetime.strptime(value, "%Y-%m-%d")  # noqa: DTZ007
+    except ValueError:
+        return value
+
+    if is_stop:
+        bound = bound.replace(hour=23, minute=59, second=59)
+
+    return bound.replace(tzinfo=UTC).isoformat().replace("+00:00", "Z")
+
+
+def meterhistory_filename_part(value: str | None) -> str:
+    """Format a meter history bound value for use in filenames."""
+    if value is None:
+        return "all"
+
+    try:
+        dt = datetime.fromisoformat(value)
+    except ValueError:
+        return value.replace(":", "-").replace("T", "_")
+
+    return dt.strftime("%d-%m-%Y_%H-%M-%S")
+
+
+def meterhistory_total_energy_mwh(history: PeblarMeterHistory) -> int:
+    """Return the highest known meter reading in mWh."""
+    total_energy_mwh = 0
+    for session in history.session:
+        for value in (session.session_start_energy_mwh, session.session_end_energy_mwh):
+            if value is not None and value > total_energy_mwh:
+                total_energy_mwh = value
+    return total_energy_mwh
+
+
+async def meterhistory_fetch_data(
+    peblar: Peblar,
+    *,
+    start: str | None,
+    stop: str | None,
+) -> tuple[str | None, str | None, PeblarMeterHistory, list[PeblarRfidToken]]:
+    """Fetch and normalize data needed for meter history export."""
+    normalized_start = normalize_meterhistory_bound(start)
+    normalized_stop = normalize_meterhistory_bound(stop, is_stop=True)
+    history = await peblar.meter_history(
+        start=normalized_start,
+        stop=normalized_stop,
+    )
+    tokens = await peblar.rfid_tokens()
+    return normalized_start, normalized_stop, history, tokens
+
+
+async def meterhistory_export_csv(
+    peblar: Peblar,
+    *,
+    start: str | None,
+    stop: str | None,
+    filename: str | None,
+) -> str:
+    """Fetch meter history and export it to CSV."""
+    normalized_start, normalized_stop, history, tokens = await meterhistory_fetch_data(
+        peblar,
+        start=start,
+        stop=stop,
+    )
+
+    time_range = ""
+    if normalized_start is not None or normalized_stop is not None:
+        time_range = (
+            f"{meterhistory_filename_part(normalized_start)}_"
+            f"{meterhistory_filename_part(normalized_stop)}_"
+        )
+    output_filename = (
+        filename or f"meter-data_{time_range}sn-{history.meta_data.product_sn}.csv"
+    )
+    token_descriptions = {
+        token.rfid_token_uid: token.rfid_token_description for token in tokens
+    }
+
+    await asyncio.to_thread(
+        write_meterhistory_csv,
+        output_filename,
+        history,
+        token_descriptions,
+        ZoneInfo(history.meta_data.time_zone),
+        meterhistory_total_energy_mwh(history),
+    )
+    return output_filename
+
+
+def meterhistory_auth_token_display(
+    auth_token: str | None,
+    token_descriptions: dict[str, str],
+) -> str:
+    """Resolve auth token to user-friendly display value."""
+    if auth_token is None:
+        return ""
+    if description := token_descriptions.get(auth_token):
+        return f"{description} ({auth_token})"
+    return auth_token
+
+
+def meterhistory_session_row(
+    index: int,
+    session: PeblarMeterHistorySession,
+    timezone: ZoneInfo,
+    token_descriptions: dict[str, str],
+    corrupted_session: list[bool],
+) -> list[str | int]:
+    """Build one CSV row for a single meter history session."""
+    session_end_energy_mwh = session.session_end_energy_mwh
+    session_energy = "Unknown"
+    cost = "Unknown"
+    if session_end_energy_mwh is not None:
+        energy_mwh = session_end_energy_mwh - session.session_start_energy_mwh
+        session_energy = format_meterhistory_energy(energy_mwh)
+        cost = "0.00"
+
+    is_corrupted = index - 1 < len(corrupted_session) and corrupted_session[index - 1]
+    return [
+        index,
+        format_meterhistory_time(session.session_start_time, timezone),
+        format_meterhistory_time(session.session_end_time, timezone),
+        format_meterhistory_energy(session.session_start_energy_mwh),
+        format_meterhistory_energy(session_end_energy_mwh),
+        session_energy,
+        cost,
+        meterhistory_auth_token_display(session.auth_token, token_descriptions),
+        "Fail" if is_corrupted else "Pass",
+    ]
+
+
+def write_meterhistory_csv(
+    filename: str,
+    history: PeblarMeterHistory,
+    token_descriptions: dict[str, str],
+    timezone: ZoneInfo,
+    total_energy_mwh: int,
+) -> None:
+    """Write meter history rows to CSV."""
+    with Path(filename).open("w", encoding="utf-8", newline="") as csv_file:
+        writer = csv.writer(csv_file, delimiter=";", lineterminator="\n")
+        writer.writerow(["# Charger information"])
+        writer.writerow(["# Serial number", history.meta_data.product_sn])
+        writer.writerow(
+            [
+                "# Meter Type",
+                "MID certified"
+                if history.meta_data.mid_certified
+                else "Not MID certified",
+            ]
+        )
+        writer.writerow(["# Timezone", history.meta_data.time_zone])
+        writer.writerow(["# Report details"])
+        writer.writerow(["# Currency", "EUR"])
+        writer.writerow(["# Price per kWh", "0.00", "(User defined)"])
+        writer.writerow(["# Totals"])
+        writer.writerow(
+            [
+                "# Total energy used (kWh)",
+                format_meterhistory_energy(total_energy_mwh),
+            ]
+        )
+        writer.writerow(["# Total cost", "0.00"])
+        writer.writerow([])
+        writer.writerow(
+            [
+                "Session number",
+                "Start time",
+                "Stop time",
+                "Start energy (kWh)",
+                "Stop energy (kWh)",
+                "Total session energy (kWh)",
+                "Cost",
+                "Authorisation token",
+                "Session validation",
+            ]
+        )
+
+        for index, session in enumerate(history.session, start=1):
+            writer.writerow(
+                meterhistory_session_row(
+                    index,
+                    session,
+                    timezone,
+                    token_descriptions,
+                    history.corrupted_session,
+                )
+            )
 
 
 @cli.error_handler(PeblarAuthenticationError)
@@ -1195,6 +1421,70 @@ async def meter(
     table.add_row("Voltage Phase 3", f"{meter_data.voltage_phase_3 or 0}V")
 
     out.print(table)
+
+
+@cli.command("meterhistory")
+# pylint: disable-next=too-many-arguments
+async def meterhistory(
+    *,
+    host: Annotated[
+        str,
+        typer.Option(
+            help="Peblar charger IP address or hostname",
+            prompt="Host address",
+            show_default=False,
+            envvar="PEBLAR_HOST",
+        ),
+    ],
+    password: Annotated[
+        str,
+        typer.Option(
+            help="Peblar charger login password",
+            prompt="Password",
+            show_default=False,
+            hide_input=True,
+            envvar="PEBLAR_PASSWORD",
+        ),
+    ],
+    start: Annotated[
+        str | None,
+        typer.Option(
+            help="Optional start time in UTC ISO format, e.g. 2026-03-17T23:00:00Z",
+        ),
+    ] = None,
+    stop: Annotated[
+        str | None,
+        typer.Option(
+            help="Optional stop time in UTC ISO format, e.g. 2026-03-18T22:59:59Z",
+        ),
+    ] = None,
+    filename: Annotated[
+        str | None,
+        typer.Option(
+            help="Optional output CSV filename",
+        ),
+    ] = None,
+    quiet: Annotated[bool, QUIET_OPTION] = False,
+) -> None:
+    """Export meter history to CSV."""
+    out = quiet_console if quiet else console
+    status_ctx = (
+        contextlib.nullcontext()
+        if quiet
+        else console.status("[cyan]Generating meter history CSV...", spinner="toggle12")
+    )
+
+    with status_ctx:
+        async with Peblar(host=host) as peblar:
+            await peblar.login(password=password)
+            output_filename = await meterhistory_export_csv(
+                peblar,
+                start=start,
+                stop=stop,
+                filename=filename,
+            )
+
+    out.print(f"✅[green]Created CSV file: {output_filename}")
 
 
 @cli.command("system")

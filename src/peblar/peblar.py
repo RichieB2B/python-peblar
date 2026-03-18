@@ -28,6 +28,7 @@ from .models import (
     PeblarLocalRestApiAccess,
     PeblarLogin,
     PeblarMeter,
+    PeblarMeterHistory,
     PeblarModbusApiAccess,
     PeblarReboot,
     PeblarRfidToken,
@@ -228,6 +229,25 @@ class Peblar:
         result = await self.request(URL("config/auth/standalonelist"))
         data: _RfidTokenListEnvelope = orjson.loads(result)
         return [PeblarRfidToken.from_dict(item) for item in data["Tokens"]]
+
+    async def meter_history(
+        self,
+        *,
+        start: str | None = None,
+        stop: str | None = None,
+    ) -> PeblarMeterHistory:
+        """Get meter history in the requested time range."""
+        url = URL("statistics/meterhistory")
+        query: dict[str, str] = {}
+        if start:
+            query["StartTime"] = start
+        if stop:
+            query["StopTime"] = stop
+        if query:
+            url = url.with_query(query)
+
+        result = await self.request(url)
+        return PeblarMeterHistory.from_json(result)
 
     async def add_rfid_token(
         self,
