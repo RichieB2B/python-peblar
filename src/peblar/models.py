@@ -569,8 +569,8 @@ class PeblarMeterHistory(BaseModel):
     corrupted_session: list[bool] = field(
         metadata=field_options(alias="CorruptedSession")
     )
-    meta_data: PeblarMeterHistoryMetaData = field(
-        metadata=field_options(alias="MetaData")
+    meta_data: PeblarMeterHistoryMetaData | None = field(
+        default=None, metadata=field_options(alias="MetaData")
     )
     session: list[PeblarMeterHistorySession] = field(
         metadata=field_options(alias="Session")

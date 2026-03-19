@@ -247,6 +247,13 @@ class Peblar:
             url = url.with_query(query)
 
         result = await self.request(url)
+        raw: dict[str, object] = orjson.loads(result)
+        if raw.get("NoSessions") is True:
+            return PeblarMeterHistory(
+                corrupted=False,
+                corrupted_session=[],
+                session=[],
+            )
         return PeblarMeterHistory.from_json(result)
 
     async def add_rfid_token(

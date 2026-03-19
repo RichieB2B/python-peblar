@@ -139,13 +139,16 @@ async def meterhistory_export_csv(
     start: str | None,
     stop: str | None,
     filename: str | None,
-) -> str:
-    """Fetch meter history and export it to CSV."""
+) -> str | None:
+    """Fetch meter history and export it to CSV, or None when no sessions exist."""
     normalized_start, normalized_stop, history, tokens = await meterhistory_fetch_data(
         peblar,
         start=start,
         stop=stop,
     )
+
+    if not history.session or not history.meta_data:
+        return None
 
     time_range = ""
     if normalized_start is not None or normalized_stop is not None:
@@ -224,16 +227,16 @@ def write_meterhistory_csv(
     with Path(filename).open("w", encoding="utf-8", newline="") as csv_file:
         writer = csv.writer(csv_file, delimiter=";", lineterminator="\n")
         writer.writerow(["# Charger information"])
-        writer.writerow(["# Serial number", history.meta_data.product_sn])
+        writer.writerow(["# Serial number", history.meta_data.product_sn])  # type: ignore[union-attr]
         writer.writerow(
             [
                 "# Meter Type",
                 "MID certified"
-                if history.meta_data.mid_certified
+                if history.meta_data.mid_certified  # type: ignore[union-attr]
                 else "Not MID certified",
             ]
         )
-        writer.writerow(["# Timezone", history.meta_data.time_zone])
+        writer.writerow(["# Timezone", history.meta_data.time_zone])  # type: ignore[union-attr]
         writer.writerow(["# Report details"])
         writer.writerow(["# Currency", "EUR"])
         writer.writerow(["# Price per kWh", "0.00", "(User defined)"])
@@ -1484,7 +1487,10 @@ async def meterhistory(
                 filename=filename,
             )
 
-    out.print(f"✅[green]Created CSV file: {output_filename}")
+    if output_filename is None:
+        out.print("⚠️  [yellow]No sessions found for the requested time range.")
+    else:
+        out.print(f"✅[green]Created CSV file: {output_filename}")
 
 
 @cli.command("system")
