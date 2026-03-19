@@ -21,5 +21,9 @@ class PeblarAuthenticationError(PeblarResponseError):
     """Peblar connection exception."""
 
 
+class PeblarBadRequestError(PeblarResponseError):
+    """Peblar bad request (HTTP 400) exception."""
+
+
 class PeblarUnsupportedFirmwareVersionError(PeblarError):
     """Peblar unsupported version exception."""

@@ -21,6 +21,7 @@ from zeroconf.asyncio import AsyncServiceBrowser, AsyncServiceInfo, AsyncZerocon
 from peblar.const import AccessMode, CPState, PackageType, SmartChargingMode
 from peblar.exceptions import (
     PeblarAuthenticationError,
+    PeblarBadRequestError,
     PeblarConnectionError,
     PeblarUnsupportedFirmwareVersionError,
 )
@@ -82,9 +83,13 @@ def normalize_meterhistory_bound(
     if value is None or "T" in value:
         return value
 
-    try:
-        bound = datetime.strptime(value, "%Y-%m-%d")  # noqa: DTZ007
-    except ValueError:
+    for fmt in ("%Y-%m-%d", "%d-%m-%Y"):
+        try:
+            bound = datetime.strptime(value, fmt)  # noqa: DTZ007
+            break
+        except ValueError:
+            continue
+    else:
         return value
 
     if is_stop:
@@ -125,10 +130,14 @@ async def meterhistory_fetch_data(
     """Fetch and normalize data needed for meter history export."""
     normalized_start = normalize_meterhistory_bound(start)
     normalized_stop = normalize_meterhistory_bound(stop, is_stop=True)
-    history = await peblar.meter_history(
-        start=normalized_start,
-        stop=normalized_stop,
-    )
+    try:
+        history = await peblar.meter_history(
+            start=normalized_start,
+            stop=normalized_stop,
+        )
+    except PeblarBadRequestError as exc:
+        console.print(f"❌[red]Bad request: {exc}")
+        raise typer.Exit(code=1) from exc
     tokens = await peblar.rfid_tokens()
     return normalized_start, normalized_stop, history, tokens
 

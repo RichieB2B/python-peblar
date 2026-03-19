@@ -15,6 +15,7 @@ from yarl import URL
 
 from .exceptions import (
     PeblarAuthenticationError,
+    PeblarBadRequestError,
     PeblarConnectionError,
     PeblarConnectionTimeoutError,
     PeblarError,
@@ -101,6 +102,13 @@ class Peblar:
                     headers={"Content-Type": "application/json"},
                     data=data.to_json() if data else None,
                 )
+                if response.status == 400:
+                    body = await response.text()
+                    try:
+                        msg = orjson.loads(body) if body else "Bad request"
+                    except orjson.JSONDecodeError:
+                        msg = body or "Bad request"
+                    raise PeblarBadRequestError(msg)
                 response.raise_for_status()
         except TimeoutError as exception:
             msg = "Timeout occurred while connecting to the Peblar charger"
@@ -386,6 +394,13 @@ class PeblarApi:
                     },
                     data=data.to_json() if data else None,
                 )
+                if response.status == 400:
+                    body = await response.text()
+                    try:
+                        msg = orjson.loads(body) if body else "Bad request"
+                    except orjson.JSONDecodeError:
+                        msg = body or "Bad request"
+                    raise PeblarBadRequestError(msg)
                 response.raise_for_status()
         except TimeoutError as exception:
             msg = "Timeout occurred while connecting to the Peblar charger API"
