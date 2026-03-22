@@ -5,6 +5,8 @@ import contextlib
 import csv
 import io
 import sys
+from collections import defaultdict
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Annotated
@@ -112,13 +114,19 @@ def meterhistory_filename_part(value: str | None) -> str:
 
 
 def meterhistory_total_energy_mwh(history: PeblarMeterHistory) -> int:
-    """Return the highest known meter reading in mWh."""
-    total_energy_mwh = 0
-    for session in history.session:
-        for value in (session.session_start_energy_mwh, session.session_end_energy_mwh):
-            if value is not None and value > total_energy_mwh:
-                total_energy_mwh = value
-    return total_energy_mwh
+    """Return total energy in mWh: max end reading minus min start across sessions."""
+    if not history.session:
+        return 0
+    ends = [
+        s.session_end_energy_mwh
+        for s in history.session
+        if s.session_end_energy_mwh is not None
+    ]
+    if not ends:
+        return 0
+    max_end = max(ends)
+    min_start = min(s.session_start_energy_mwh for s in history.session)
+    return max(0, max_end - min_start)
 
 
 async def meterhistory_fetch_data(
@@ -181,6 +189,121 @@ async def meterhistory_export_csv(
         meterhistory_total_energy_mwh(history),
     )
     return output_filename
+
+
+def meterhistory_summary_rfid_tag(
+    auth_token: str | None,
+    token_descriptions: dict[str, str],
+) -> str:
+    """RFID name from charger config; empty if unknown or no token."""
+    if auth_token is None:
+        return ""
+    return token_descriptions.get(auth_token, "")
+
+
+def meterhistory_summary_auth_token_cell(auth_token: str | None) -> str:
+    """Authorisation token UID; empty when the session has no token."""
+    return auth_token or ""
+
+
+def meterhistory_aggregate_by_auth_token(
+    history: PeblarMeterHistory,
+) -> dict[str | None, tuple[int, int]]:
+    """Map auth_token -> (session_count, total_session_energy_mwh).
+
+    Session energy is end minus start when end is known; otherwise the session
+    contributes to the count only (0 mWh to the sum).
+    """
+    counts: dict[str | None, int] = defaultdict(int)
+    energies: dict[str | None, int] = defaultdict(int)
+    for session in history.session:
+        key = session.auth_token
+        counts[key] += 1
+        if session.session_end_energy_mwh is not None:
+            energies[key] += (
+                session.session_end_energy_mwh - session.session_start_energy_mwh
+            )
+    keys = set(counts) | set(energies)
+    return {k: (counts[k], energies[k]) for k in keys}
+
+
+def meterhistory_print_summary(
+    out: Console,
+    history: PeblarMeterHistory,
+    tokens: list[PeblarRfidToken],
+) -> None:
+    """Print total span energy, session count, and per-auth-token table."""
+    token_descriptions = {
+        token.rfid_token_uid: token.rfid_token_description for token in tokens
+    }
+    total_mwh = meterhistory_total_energy_mwh(history)
+    total_kwh = total_mwh / 1_000_000
+    n_sessions = len(history.session)
+    out.print(f"Total energy (meter span): {total_kwh:,.3f} kWh")
+    out.print(f"Sessions: {n_sessions}")
+
+    table = Table(title="Energy by authorisation token")
+    table.add_column("Authorisation token", style="cyan")
+    table.add_column("RFID tag", style="cyan")
+    table.add_column("Sessions", justify="right", style="bold")
+    table.add_column("Total energy (kWh)", justify="right", style="bold")
+
+    agg = meterhistory_aggregate_by_auth_token(history)
+
+    def sort_key(item: tuple[str | None, tuple[int, int]]) -> tuple[float, str]:
+        token, (_cnt, mwh_sum) = item
+        kwh = mwh_sum / 1_000_000
+        return (-kwh, token or "")
+
+    for auth_token, (cnt, mwh_sum) in sorted(agg.items(), key=sort_key):
+        kwh = mwh_sum / 1_000_000
+        table.add_row(
+            meterhistory_summary_auth_token_cell(auth_token),
+            meterhistory_summary_rfid_tag(auth_token, token_descriptions),
+            str(cnt),
+            f"{kwh:,.3f}",
+        )
+    out.print(table)
+
+
+@dataclass(frozen=True, slots=True)
+class MeterHistoryCliOptions:
+    """CLI options for meter history fetch / export."""
+
+    start: str | None
+    stop: str | None
+    filename: str | None
+    export: bool
+
+
+async def meterhistory_run_with_client(
+    peblar: Peblar,
+    out: Console,
+    *,
+    options: MeterHistoryCliOptions,
+) -> None:
+    """Fetch meter history and either export CSV or print summary."""
+    if options.export:
+        output_filename = await meterhistory_export_csv(
+            peblar,
+            start=options.start,
+            stop=options.stop,
+            filename=options.filename,
+        )
+        if output_filename is None:
+            out.print("⚠️  [yellow]No sessions found for the requested time range.")
+        else:
+            out.print(f"✅[green]Created CSV file: {output_filename}")
+        return
+    _ns, _ne, history, tokens = await meterhistory_fetch_data(
+        peblar,
+        start=options.start,
+        stop=options.stop,
+    )
+    if history.session:
+        meterhistory_print_summary(out, history, tokens)
+    else:
+        out.print("⚠️  [yellow]No sessions found for the requested time range.")
 
 
 def meterhistory_auth_token_display(
@@ -1473,33 +1596,44 @@ async def meterhistory(
     filename: Annotated[
         str | None,
         typer.Option(
-            help="Optional output CSV filename",
+            help="Optional output CSV filename (only with --export)",
         ),
     ] = None,
+    export: Annotated[
+        bool,
+        typer.Option(
+            "--export",
+            help="Write meter history to a CSV file; default is summary only",
+        ),
+    ] = False,
     quiet: Annotated[bool, QUIET_OPTION] = False,
 ) -> None:
-    """Export meter history to CSV."""
+    """Show meter history summary, or export to CSV with --export."""
     out = quiet_console if quiet else console
+    status_msg = (
+        "[cyan]Generating meter history CSV..."
+        if export
+        else "[cyan]Loading meter history..."
+    )
     status_ctx = (
         contextlib.nullcontext()
         if quiet
-        else console.status("[cyan]Generating meter history CSV...", spinner="toggle12")
+        else console.status(status_msg, spinner="toggle12")
     )
 
     with status_ctx:
         async with Peblar(host=host) as peblar:
             await peblar.login(password=password)
-            output_filename = await meterhistory_export_csv(
+            await meterhistory_run_with_client(
                 peblar,
-                start=start,
-                stop=stop,
-                filename=filename,
+                out,
+                options=MeterHistoryCliOptions(
+                    start=start,
+                    stop=stop,
+                    filename=filename,
+                    export=export,
+                ),
             )
-
-    if output_filename is None:
-        out.print("⚠️  [yellow]No sessions found for the requested time range.")
-    else:
-        out.print(f"✅[green]Created CSV file: {output_filename}")
 
 
 @cli.command("system")
