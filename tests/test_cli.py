@@ -57,17 +57,19 @@ def _add_identify_responses(aresponses: ResponsesMockServer) -> None:
 
 
 @pytest.mark.asyncio
-async def test_versions_quiet_option_suppresses_output(
+async def test_versions_quiet_still_prints_table(
     aresponses: ResponsesMockServer,
 ) -> None:
-    """Test that --quiet option suppresses console output for versions command."""
+    """--quiet suppresses status/success only; versions table still prints."""
     _add_versions_responses(aresponses)
 
     capture = io.StringIO()
     with redirect_stdout(capture):
         await versions(host="example.com", password="secret", quiet=True)
 
-    assert capture.getvalue().strip() == ""
+    output = capture.getvalue()
+    assert "Peblar charger versions" in output
+    assert "1.6.1+1" in output
 
 
 @pytest.mark.asyncio
@@ -89,24 +91,24 @@ async def test_versions_without_quiet_shows_output(
 
 
 @pytest.mark.asyncio
-async def test_versions_short_quiet_flag(
+async def test_versions_short_quiet_flag_still_prints_table(
     aresponses: ResponsesMockServer,
 ) -> None:
-    """Test that -q short flag suppresses output for versions command."""
+    """Test that -q still prints the versions table."""
     _add_versions_responses(aresponses)
 
     capture = io.StringIO()
     with redirect_stdout(capture):
         await versions(host="example.com", password="secret", quiet=True)
 
-    assert capture.getvalue().strip() == ""
+    assert "Firmware" in capture.getvalue()
 
 
 @pytest.mark.asyncio
-async def test_identify_quiet_suppresses_output(
+async def test_identify_quiet_suppresses_success_line(
     aresponses: ResponsesMockServer,
 ) -> None:
-    """Test that --quiet suppresses output for identify command."""
+    """Test that --quiet hides the spinner and Success line (no table on identify)."""
     _add_identify_responses(aresponses)
 
     capture = io.StringIO()
