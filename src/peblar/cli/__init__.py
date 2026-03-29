@@ -42,7 +42,7 @@ console = Console()
 QUIET_OPTION = typer.Option(
     "--quiet",
     "-q",
-    help="Suppress status spinners and success lines; tables and results still print",
+    help="Be quiet on success; read-only commands still print tables and results",
     envvar="PEBLAR_QUIET",
 )
 
@@ -278,6 +278,7 @@ class MeterHistoryCliOptions:
     stop: str | None
     filename: str | None
     export: bool
+    quiet: bool
 
 
 async def meterhistory_run_with_client(
@@ -294,12 +295,13 @@ async def meterhistory_run_with_client(
             stop=options.stop,
             filename=options.filename,
         )
-        if output_filename is None:
-            rich_console.print(
-                "⚠️  [yellow]No sessions found for the requested time range."
-            )
-        else:
-            rich_console.print(f"✅[green]Created CSV file: {output_filename}")
+        if not options.quiet:
+            if output_filename is None:
+                rich_console.print(
+                    "⚠️  [yellow]No sessions found for the requested time range."
+                )
+            else:
+                rich_console.print(f"✅[green]Created CSV file: {output_filename}")
         return
     _ns, _ne, history, tokens = await meterhistory_fetch_data(
         peblar,
@@ -736,6 +738,8 @@ async def rest_api(
                 if generate_new_token:
                     await peblar.api_token(generate_new_api_token=generate_new_token)
             print_cli_success(quiet=quiet, message="✅[green]Success!")
+            if quiet:
+                return
 
         config = await peblar.user_configuration()
         token = await peblar.api_token()
@@ -826,6 +830,8 @@ async def modbus(
                 if write:
                     await peblar.modbus_api(access_mode=AccessMode.READ_WRITE)
             print_cli_success(quiet=quiet, message="✅[green]Success!")
+            if quiet:
+                return
         config = await peblar.user_configuration()
 
     table = Table(title="Peblar Modbus API configuration")
@@ -1410,6 +1416,8 @@ async def ev(
                         force_single_phase=force_single_phase,
                     )
                 print_cli_success(quiet=quiet, message="✅[green]Success")
+                if quiet:
+                    return
 
             ev_interface = await api.ev_interface()
 
@@ -1626,6 +1634,7 @@ async def meterhistory(
                     stop=stop,
                     filename=filename,
                     export=export,
+                    quiet=quiet,
                 ),
             )
 
