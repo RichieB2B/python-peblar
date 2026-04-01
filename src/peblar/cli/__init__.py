@@ -3,6 +3,8 @@
 import asyncio
 import contextlib
 import csv
+import functools
+import locale
 import sys
 from collections import defaultdict
 from dataclasses import dataclass
@@ -211,6 +213,30 @@ def meterhistory_summary_auth_token_cell(auth_token: str | None) -> str:
     return auth_token or ""
 
 
+@functools.lru_cache(maxsize=1)
+def _locale_numeric_usable() -> bool:
+    """Whether LC_NUMERIC was taken from the environment (cached)."""
+    try:
+        locale.setlocale(locale.LC_NUMERIC, "")
+    except locale.Error:
+        return False
+    return True
+
+
+def format_locale_decimal(value: float, *, digits: int = 3) -> str:
+    """Format a float using locale thousands and decimal separators."""
+    if _locale_numeric_usable():
+        return locale.format_string(f"%.{digits}f", value, grouping=True)
+    return f"{value:,.{digits}f}"
+
+
+def format_locale_int(value: int) -> str:
+    """Format an int using locale thousands grouping."""
+    if _locale_numeric_usable():
+        return locale.format_string("%d", value, grouping=True)
+    return f"{value:,}"
+
+
 def meterhistory_aggregate_by_auth_token(
     history: PeblarMeterHistory,
 ) -> dict[str | None, tuple[int, int]]:
@@ -243,8 +269,8 @@ def meterhistory_print_summary(
     total_mwh = meterhistory_total_energy_mwh(history)
     total_kwh = total_mwh / 1_000_000
     n_sessions = len(history.session)
-    console.print(f"Total energy (meter span): {total_kwh:,.3f} kWh")
-    console.print(f"Sessions: {n_sessions}")
+    console.print(f"Total energy (meter span): {format_locale_decimal(total_kwh)} kWh")
+    console.print(f"Sessions: {format_locale_int(n_sessions)}")
 
     table = Table(title="Energy by authorisation token")
     table.add_column("Authorisation token", style="cyan")
@@ -264,8 +290,8 @@ def meterhistory_print_summary(
         table.add_row(
             meterhistory_summary_auth_token_cell(auth_token),
             meterhistory_summary_rfid_tag(auth_token, token_descriptions),
-            str(cnt),
-            f"{kwh:,.3f}",
+            format_locale_int(cnt),
+            format_locale_decimal(kwh),
         )
     console.print(table)
 

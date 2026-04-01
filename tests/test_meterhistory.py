@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import io
+import re
 from contextlib import redirect_stdout
 from pathlib import Path  # noqa: TC003
 
@@ -86,9 +87,9 @@ async def test_meterhistory_summary_shows_totals_and_table(
 
     out = capture.getvalue()
     # Total span: max(end) - min(start) = 1998041111 - 1956857265 = 41183846 mWh
-    assert "41.184" in out
+    assert re.search(r"41[.,]184", out), out
     assert "kWh" in out
-    assert "Sessions: 2" in out
+    assert re.search(r"Sessions:\s*2\b", out), out
     assert "Energy by authorisation token" in out
     assert "123456789A1234" in out
     assert "12345E01234567" in out
